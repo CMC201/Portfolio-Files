@@ -1,0 +1,172 @@
+---
+title: "Severe Weather Events Causing Economic Damage or Casualties in the United States"
+author: "Cameron Charness"
+date: "September 25, 2018"
+output: 
+  pdf_document:
+    includes:  
+      in_header: preamble-tex.tex
+    fig_width: 10
+    fig_height: 6
+  html_document: 
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=TRUE, warning = F, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+options(scipen=1,digits=2)
+options(knitr.table.format = "latex")
+library(formatR)
+library(dplyr)
+library(tidyr)
+library(R.utils)
+library(data.table)
+library(lattice)
+library(latticeExtra)
+library(kableExtra)
+library(rlang)
+```
+
+## Executive Summary
+
+For this report, we analyze data from the National Oceanic and Atmospheric Administration's storm database from 1950 to 2011. This database contains observations from various types of severe weather events across the entire United States (and some marine areas), including reports of property and crop damage as well as injuries and fatalities resulting from each event. We cleaned up this data to include only events resulting in either deaths, injuries, or significant damage. We then consolidated the large number of event categories into a few broader event types in order to analyze their impacts. Our analysis indicates that there is some difference between which types of events cause the most economic damage and which cause the most casualties (including both injuries and deaths), though there is of course substantial overlap. Ultimately, we conclude that casualties are most likely to occur in the wake of more localized, less predictable events such as tornadoes and thunderstorms, whereas economic damage comes more from larger or longer-duration events such as hurricanes and flooding.
+
+## Data Processing
+
+We begin by unzipping and extracting the raw data into a table with read.csv, and using the head function to take a quick look at the first few rows. We'll want to use the cache option on this code chunk, as the dataset is quite large and takes nontrivial time to load into R.
+
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+bunzip2('repdata_data_StormData.csv.bz2','repdata_data_StormData.csv',skip=TRUE)
+rawdata<-read.csv2('repdata_data_StormData.csv',header=TRUE,sep=',')
+head(rawdata)
+```
+
+Right away, we can see that this dataset will require a bit of cleaning to get into a more useful form. We see lots of missing entries, and further examination reveals that the 'EVTYPE' variable specifying the type of storm event contains 985 unique entries, many of which seem to be duplicate descriptions of the same/very similar event types (i.e. 'GUSTY THUNDERSTORM WINDS', 'GUSTY THUNDERSTORM WIND', 'TSTM WIND' are all listed as separate event types). We also have inconsistent entries in the 'PROPDMGEXP' and 'CROPDMGEXP' variables, which give a multiplier to get from the entries in 'PROPDMG' and 'CROPDMG' to actual dollar amounts of damage. For simplicity's sake, we'll start by removing all entries with zero damage or multipliers less than 'K/k' (1000x), as long as they also have no reported injuries or fatalities. This should declutter the data substantially by removing relatively minor events that wouldn't impact our overall assessment much. We'll also drop some additional variables that aren't relevant to our analysis, leaving only the following observations for each event: STATE, COUNTYNAME, EVTYPE, FATALITIES, INJURIES, PROPDMG/PROPDMGEXP, CROPDMG/CROPDMGEXP.
+
+```{r, cache=TRUE}
+prelimclean<-subset(rawdata, (as.numeric(as.character(PROPDMG))>0 & PROPDMGEXP %in% c('k','K','m','M','b','B'))|(as.numeric(as.character(CROPDMG))>0 & CROPDMGEXP %in% c('k','K','m','M','b','B'))|as.numeric(as.character(INJURIES))>0|as.numeric(as.character(FATALITIES))>0, select=c(STATE, COUNTYNAME, EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP))
+```
+
+Now we have a dataset that is substantially smaller and contains only events with significant impacts. We will further clean up the data by doing a bit of dimension reduction. We can generate a total damage estimate by converting the PROPDMGEXP and CROPDMGEXP variables into numeric multipliers, and performing the necessary arithmetic (i.e. DMGTOTAL = PROPDMG\*PROPDMGEXP + CROPDMG\*CROPDMGEXP). We will also compress the INJURIES and FATALITIES down to a total CASUALTIES variable, with each injury counting for 3/10 the value of a fatality (in the absence of more data about the specific injuries, we want to preserve some sense of the magnitude of an event by weighting fatalities more heavily than injuries).
+
+```{r, message = FALSE, warning = F}
+#Substitute the character multipliers with numeric ones given in the codebook using a lookup table
+#In order to match the multiplier that's just an empty space, we must first replace the empty space with a character to match on for our substitution
+prelimclean$PROPDMGEXP<-gsub('^$','_',as.character(prelimclean$PROPDMGEXP))
+prelimclean$CROPDMGEXP<-gsub('^$','_',as.character(prelimclean$CROPDMGEXP))
+lut<-c('_'=1,'k'=1000,'K'=1000,'m'=1000000,'M'=1000000,'b'=1000000000,'B'=1000000000)
+reduceddata<-prelimclean %>% mutate(PROPDMGEXP=recode(PROPDMGEXP,!!!lut)) %>% mutate(CROPDMGEXP=recode(CROPDMGEXP,!!!lut))
+#Replace the PROPDMG and CROPDMG fields with the calculated DMGTOTAL
+reduceddata<-reduceddata %>% mutate(DMGTOTAL=(as.numeric(as.character(PROPDMG)))*PROPDMGEXP+(as.numeric(as.character(CROPDMG)))*CROPDMGEXP) %>% mutate(PROPDMG=NULL) %>% mutate(PROPDMGEXP=NULL) %>% mutate(CROPDMG=NULL) %>% mutate(CROPDMGEXP=NULL)
+#Replace the INJURIES and FATALITIES fields with the calculated CASUALTIES
+reduceddata<-reduceddata %>%
+mutate(CASUALTIES=(as.numeric(as.character(INJURIES)))*0.3+(as.numeric(as.character(FATALITIES)))) %>% mutate(INJURIES=NULL) %>% mutate(FATALITIES=NULL)
+```
+
+Looking at the resulting table, we can see an event that looks like an outlier: flooding in Napa, CA resulting in \$115 billion in damage. If we go back to the original data table and look up floods in Napa, we can see entries for a flood causing both \$115 million and \$115 billion in damages, so it looks like this is a data entry error (indeed, if we look up the corresponding event, widespread flooding in Northern California in winter 2005-2006, we see total damage estimates across several counties of about \$300 million). We can simply remove the incorrect entry. The other very high-damage events seem to correspond well to actual historic incidents, so we can safely leave them alone. We'll also take this opportunity to remove any entries with 'NA' total damage (presumably resulting from unusual entries in either PROPDMGEXP or CROPDMGEXP in earlier steps), since there are only 37 such entries out of a total of about 250,000 so our analysis should be essentially unaffected.
+
+```{r}
+maxID<-which.max(reduceddata$DMGTOTAL)
+reduceddata<-reduceddata[-maxID,]
+reduceddata<-na.omit(reduceddata)
+```
+
+The last processing step we must perform is to condense the number of event types down from the current 985 to something a bit more manageable. We'll start by grouping our current set of events by event type and summing both the damage totals and casualty totals for each event type.
+
+```{r}
+by_event_damage<-reduceddata %>% group_by(EVTYPE) %>% summarize(DMGTOTAL=sum(DMGTOTAL))
+by_event_casualties<-reduceddata %>% group_by(EVTYPE) %>% summarize(CASUALTIES=sum(CASUALTIES))
+```
+
+Now we can sort in descending order of damage and casualties and examine the last few rows of each table to see if a small number of event types contribute the vast majority of the damage and/or casualty totals.
+
+```{r,error = TRUE}
+by_event_damage<-by_event_damage %>% arrange(desc(DMGTOTAL))
+head(by_event_damage, n=15L)
+by_event_casualties<-by_event_casualties %>% arrange(desc(CASUALTIES))
+head(by_event_casualties, n=15L)
+```
+It seems that tornadoes, thunderstorm wind, heat, flooding, and lightning account for most of the total casualties, and that hurricanes, tornadoes, flooding, drought, and hail cover most of the property/crop damage. We can also see some redundancies and duplications in the listed event types, and can combine them as follows:  
+
+* Hurricane:
+    + Hurricane/Typhoon
+    + Hurricane
+    + Tropical Storm
+    + Storm Surge
+* WinterStorm:
+    + Winter Storm
+    + Ice Storm
+    + Heavy Snow
+    + Blizzard
+* Thunderstorm:
+    + TSTM Wind
+    + Hail
+    + Thunderstorm Wind
+    + Thunderstorm Winds
+    + High Wind
+    + Lightning
+* HeatEvent:
+    + Excessive Heat
+    + Heat
+* Flooding:
+    + Flood
+    + Flash Flood
+    + River Flood
+* DroughtFire:
+    + Drought
+    + Wildfire  
+
+We can accomplish this consolidation by mapping the existing EVTYPE entries to our new condensed categories as follows:
+```{r,error = TRUE}
+evlookup<-c('HURRICANE/TYPHOON'='HURRICANE','HURRICANE'='HURRICANE','TROPICAL STORM'='HURRICANE','STORM SURGE'='HURRICANE','STORM SURGE/TIDE'='HURRICANE','HURRICANE OPAL'='HURRICANE','WINTER STORM'='WINTER STORM','ICE STORM'='WINTER STORM','HEAVY SNOW'='WINTER STORM','BLIZZARD'='WINTER STORM','TSTM WIND'='THUNDERSTORM','HAIL'='THUNDERSTORM','THUNDERSTORM WIND'='THUNDERSTORM','THUNDERSTORM WINDS'='THUNDERSTORM','HIGH WIND'='THUNDERSTORM','LIGHTNING'='THUNDERSTORM','EXCESSIVE HEAT'='HEATEVENT','HEAT'='HEATEVENT','FLOOD'='FLOODING','FLASH FLOOD'='FLOODING','RIVER FLOOD'='FLOODING','DROUGHT'='DROUGHTFIRE','WILDFIRE'='DROUGHTFIRE','TORNADO'='TORNADO','RIP CURRENT'='RIP CURRENT','RIP CURRENTS'='RIP CURRENT')
+finaldata<-reduceddata %>% mutate(EVTYPE=recode(EVTYPE,!!!evlookup))
+finaldata<-na.omit(finaldata)
+final_by_damage<-finaldata %>% group_by(EVTYPE) %>% summarize(DMGTOTAL=sum(DMGTOTAL))
+final_by_damage<-final_by_damage %>% arrange(desc(DMGTOTAL))
+final_by_casualties<-finaldata %>% group_by(EVTYPE) %>% summarize(CASUALTIES=sum(CASUALTIES))
+final_by_casualties<-final_by_casualties %>% arrange(desc(CASUALTIES))
+```
+This should get us to a reasonably compact list of event types to examine:  
+* Hurricane  
+* Winter Storm  
+* Thunderstorm  
+* Heat Event  
+* Flooding  
+* Drought/Fire  
+* Tornado  
+* Rip Current    
+
+We can calculate the percentage of total damage or casualties resulting from each event type and add that column to each table for later interpretation:
+```{r}
+final_by_damage<-mutate(final_by_damage,DMGPCT=100*DMGTOTAL/sum(DMGTOTAL))
+final_by_casualties<-mutate(final_by_casualties,CASUALTIESPCT=100*CASUALTIES/sum(CASUALTIES))
+```
+And finally, we will split off the top 6 event types by percentage of damage and casualties into separate tables for use in producing figures. We will also tweak some columns a bit for readability (changing column names to be more human-readable and converting our numbers down a few orders of magnitude to avoid a bunch of trailing zeroes).
+```{r}
+topdamage<-final_by_damage[1:6,]
+topcasualties<-final_by_casualties[1:6,]
+topdamage<-topdamage %>% mutate(DMGTOTALBBN=DMGTOTAL/(10^9)) %>% mutate(DMGTOTAL=NULL)
+colnames(topdamage)<-c('Event Type','Percentage of Total Severe Weather Damage','Total Damage (in billion USD)')
+topcasualties<-topcasualties %>% mutate(KCASUALTIES=CASUALTIES/1000) %>% mutate(CASUALTIES=NULL)
+colnames(topcasualties)<-c('Event Type','Percentage of Total Severe Weather Casualties','Total Casualties (thousands)')
+```
+## Results
+
+From our analysis, we identified 6 categories of severe weather events that were responsible for over 90% of total reported property/crop damage and casualties. A summary of these events and their associate damage or casualties follows in the tables below. We also present this data as a bar plot for a more intuitive look. 
+```{r, echo=FALSE}
+kable(topdamage,caption='Severe Weather Events by Total Damage') %>%
+  kable_styling(latex_options = c("striped",'hold_position'), full_width = T)
+kable(topcasualties,caption='Severe Weather Events by Total Casualties') %>%
+  kable_styling(latex_options = c("striped"), full_width = T)
+```   
+```{r, results='asis', echo=FALSE}
+par(mfrow=c(1,2),mar=c(7,4,4,2)+0.1)
+barplot(topdamage$`Total Damage (in billion USD)`,names.arg=topdamage$`Event Type`,las=2,cex.names=0.75,col='Blue',ylab='Total Damage (billion USD)',main='Most Damaging Weather Event Types',font = 2, yaxt = "n")
+axis(side = 2)
+barplot(topcasualties$`Total Casualties (thousands)`,names.arg=topcasualties$`Event Type`,las=2,cex.names=0.75,col='Red',ylab='Total Casualties (thousands)',main='Most Casualty-inflicting Weather Event Types',font = 2, yaxt = "n")
+axis(side = 2)
+```
+
+So we can clearly see that hurricanes, flood events, and tornadoes cause the most property and crop damage of the examined event types, while tornadoes cause the most casualties by far. Thunderstorm-related events cause both significant casualties and substantial property/crop damage. This makes a certain amount of sense: hurricanes and flooding are generally able to be predicted well in advance, allowing for evacuation or other measures to reduce casualties (but since buildings, agricultural operations, etc. can't be evacuated, substantial property damage still results). Tornadoes and thunderstorm impacts, by contrast, are significantly more localized and less predictable, making it difficult for preparations to be made to reduce casualties.

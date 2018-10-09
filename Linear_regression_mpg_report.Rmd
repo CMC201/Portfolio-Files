@@ -1,0 +1,81 @@
+---
+title: "Linear Regression Course Project"
+author: "Cameron Charness"
+date: "September 4, 2018"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(fig.width=8, fig.height=6) 
+library(ggplot2)
+library(GGally)
+library(knitr)
+library(gridExtra)
+data(mtcars)
+mt=mtcars
+mt$am = factor(mt$am, levels=c(0,1),labels=c("automatic","manual"))
+```
+#### Executive Summary
+For this project, we are tasked with determining the effect, if any, of transmission type on fuel economy for vehicles in the 'mtcars' dataset of cars tested by Motor Trend magazine in 1974. Examining only fuel economy and transmission type seems to indicate a relationship between these two variables, with manual transmissions delivering higher fuel economy than automatics. However, when we consider other factors, especially vehicle weight and horsepower, this strong relationship vanishes and we see that transmission type is not a significant predictor of fuel economy.
+
+#### Outline
+* Executive Summary
+* Exploratory Data Analysis
+* Model Selection
+* Conclusions
+
+#### Exploratory Data Analysis
+```{r}
+boxplot(mpg~am,data=mt,main='Fig. 1: Fuel economy (miles per gallon) by transmission type')
+p1<-ggplot(mt,aes(x=wt,y=mpg))+geom_smooth(method='lm',se=FALSE)+geom_point()+labs(x="Weight (1000 lbs)",y="Economy (mpg)")
+p2<-ggplot(mt,aes(x=disp,y=mpg))+geom_smooth(method='lm',se=FALSE)+geom_point()+labs(x="Displacement (cu. in)",y="Economy (mpg)")
+p3<-ggplot(mt,aes(x=am,y=mpg))+geom_smooth(method='lm',se=FALSE)+geom_point()+labs(x="Transmission",y="Economy (mpg)")
+p4<-ggplot(mt,aes(x=hp,y=mpg))+geom_smooth(method='lm',se=FALSE)+geom_point()+labs(x="Horsepower",y="Economy (mpg)")
+plotlist<-list(p1,p2,p3,p4)
+grid.arrange(p1,p2,p3,p4,ncol=2,bottom='Fig. 2: Fuel economy by several factors')
+```
+In order to visualize the relationship between fuel economy and transmission type, we can begin with a simple box-and-whisker plot (*Figure 1*). This will give us a sense of the distribution of fuel economy (mpg) results for each transmission type. As the plot shows, there appears to be a pretty significant difference between transmissions, with the manual group showing a higher mean mpg. So, can we simply fit a linear model here and call it a day? Unfortunately, fuel economy depends on a number of other factors, and we can't make definitive conclusions on the effect of transmission type until we explore these as well. 
+*Figure 2* gives a multipanel plot depicting the relationships between fuel economy and 4 variables (engine displacement, weight, transmission type, and horsepower). We can clearly see that all 4 seem to have an effect on fuel economy. Thus, we will need to apply some regression modeling magic to disentangle these effects and see the true relationship between transmission type and fuel economy.
+
+#### Model Selection  
+We should be able to get away with a relatively simple linear model to analyze this relationship. We can use the "step" function in R to help us select an appropriate model. Step will allow us to iterate from a model including only the transmission type to one including several variables and their interactions and evaluate which model is best (by minimizing information loss as measured by the AIC statistic).
+```{r}
+#Search for the model
+min_fit<-lm(mpg~am,data=mt)
+max_fit<-lm(mpg~.^2,data=mt)
+mt_fit<-step(min_fit,trace=0,scope=list(lower=min_fit,upper=max_fit),direction='forward')
+#Extract model data
+fit_form = deparse(formula(mt_fit))
+fit_rsquared = summary(mt_fit)$adj.r.squared
+fit_aic = AIC(mt_fit)
+```
+
+*Final Model*  
+Our step function returns a model with the below parameters:  
+*Model formula:* `r fit_form`  
+*Model r^2:* `r fit_rsquared`  
+*Model AIC:* `r fit_aic`  
+
+*Coefficients*  
+The coefficients on each term of the model are as follows:
+```{r}
+summary(mt_fit)$coef
+```
+We can interpret the coefficients of the model as follows:  
+*Intercept-* estimate of mpg for a car with hp=0,wt=0,gear=0  
+*ammanual-* increase in mpg going from automatic to manual transmission, holding other variables constant  
+*hp-* increase in mpg per additional horsepower, holding other variables constant  
+*wt-* increase in mpg per additional 1000 lbs vehicle weight, holding other variables constant  
+*gear-* increase in mpg per additional gear, holding other variables constant  
+*hp:wt-* interaction between horsepower and weight  
+
+#### Conclusions
+Just looking at the p-values for the coefficients, we can see that many other factors seem to have a more significant impact on fuel economy than the transmission type does. Horsepower and vehicle weight especially seem to be more significant. We can look at a 95% confidence interval on the 'ammanual' coefficient to be a little more rigorous about it.
+```{r}
+conf95<-confint(mt_fit)[2,]
+```
+The endpoints of our confidence interval are: `r conf95`. Since this interval includes 0, we fail to reject the null hypothesis and can't say definitively whether transmission type has any significant effect on fuel economy.
