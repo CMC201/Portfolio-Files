@@ -1,0 +1,115 @@
+---
+title: "Machine Learning Course Project"
+author: "Cameron"
+date: "October 18, 2018"
+output:
+  pdf_document: default
+  html_document: default
+references:
+- URL: http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201
+  author:
+  - family: Velloso
+    given: E
+  - family: Bulling
+    given: A
+  - family: Gellersen
+    given: H
+  - family: Ugulino
+    given: W
+  - family: Fuks
+    given: H
+  container-title: Proceedings of 4th Augmented Human (AH) International Conference
+    in cooperation with ACM SIGCHI
+  id: qarwl
+  issued:
+    year: 2013
+  title: Qualitative Activity Recognition of Weight Lifting Exercises
+  type: article-journal
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("AppliedPredictiveModeling", lib.loc="~/R/win-library/3.5")
+library("caret", lib.loc="~/R/win-library/3.5")
+library("dplyr", lib.loc="~/R/win-library/3.5")
+library("e1071", lib.loc="~/R/win-library/3.5")
+library("forecast", lib.loc="~/R/win-library/3.5")
+library("gbm", lib.loc="~/R/win-library/3.5")
+library("Hmisc", lib.loc="~/R/win-library/3.5")
+library("htmlTable", lib.loc="~/R/win-library/3.5")
+library("htmltools", lib.loc="~/R/win-library/3.5")
+library("kableExtra", lib.loc="~/R/win-library/3.5")
+library("knitr", lib.loc="~/R/win-library/3.5")
+library("lubridate", lib.loc="~/R/win-library/3.5")
+library("pgmm", lib.loc="~/R/win-library/3.5")
+library("randomForest", lib.loc="~/R/win-library/3.5")
+library("rattle", lib.loc="~/R/win-library/3.5")
+library("tseries", lib.loc="~/R/win-library/3.5")
+library("doParallel", lib.loc="~/R/win-library/3.5")
+library("parallel", lib.loc="C:/Program Files/R/R-3.5.0/library")
+```
+## Setting Up  
+
+The code in this report assumes we are in the same directory as our data source .csv files, and that a number of packages are loaded (available in the raw .Rmd file for this report).
+
+## Executive Summary  
+
+For this project, we analyzed a set of data from wearable activity monitors worn by test subjects performing a weighlifting task either correctly or with one of 4 common mistakes in technique. We developed a model to predict the class ('classe' in the data) of an exercise (i.e. correct form 'A' or one of the 4 common mistakes 'B','C','D','E') based on accelerometer data from the wearable monitors. Using a random forest model with 3-fold cross-validation on a 70/30 training/testing split of the data, we achieved an accuracy of 99.5% (out-of-sample error 0.5%) in classifying each weightlifting task. We correctly predicted 20 of 20 test cases outside our original dataset.
+
+## Data Processing  
+
+For this project, we are analyzing data from the Groupware\@LES Weight Lifting Exercises dataset, from their 2013 paper [@qarwl]. We begin by loading both the training and testing (more accurately, quiz, since it will only be used to predict quiz answers) datasets.
+```{r}
+rawtraining<-read.csv2('pml-training.csv',header=TRUE,sep=',',as.is=T)
+rawtesting<-read.csv2('pml-testing.csv',header=TRUE,sep=',',as.is=T)
+```
+Taking a quick look at the data, we see a LOT of NA values. We'll clean these up in both datasets by dropping any columns with more than 95% NA values. After this step, we notice that the test set is now much cleaner, but the training set still contains lots of empty or mostly empty columns, so we'll apply another cleaning step. We manually identify and filter out these problematic columns, in addition to removing the columns containing time information (since each row is a complete repetition of the exercise, there's no reason to keep the time data). We also notice that all of our data columns have come in as character vectors due to the way we implemented read.csv2, and we'd like to convert them to numeric values (or, for one column, factors). This gives us our final training and test (really, quiz) datasets.
+```{r}
+reducedtraining<-Filter(function(x) sum(!is.na(x))>0.95*length(x),rawtraining)
+reducedtesting<-Filter(function(x) sum(!is.na(x))>0.95*length(x),rawtesting)
+finaltraining<-reducedtraining[,c(8:11,21:42,49:51,61:73,83:93)]
+finaltraining[,1:52]<-sapply(finaltraining[,1:52],as.numeric)
+finaltraining[,53]<-as.factor(finaltraining[,53])
+finalquiz<-reducedtesting[,8:60]
+finalquiz[,1:52]<-sapply(finalquiz[,1:52],as.numeric)
+```
+
+## Predictive Model Building  
+
+Now that the data is nicely cleaned up, we can get started building our predictive model. We will first split our "training" dataset into training and testing subsets, using a 70/30 split.
+```{r}
+set.seed(3054)
+inTrain<-createDataPartition(finaltraining$classe,p=0.7,list=FALSE)
+training<-finaltraining[inTrain,]
+testing<-finaltraining[-inTrain,]
+```
+Now, we'll set up parallel processing for building our model fit, which will save us some computing time.
+```{r}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+```
+We can now build in some parameters to control our model fitting process. Here, we'll set up for 3-fold cross-validation.
+```{r}
+fitparams <- trainControl(method = "cv", number = 3,allowParallel = TRUE)
+```
+Finally, we're ready to train our model. Since we're trying to classify our outcomes into a small number of categories and the data is relatively noisy (as one might expect for data tracking human movements), we'll use a random forest model. We'll cache this particular code chunk to avoid rebuilding the model from scratch every time we knit this markdown document. The 'caret' package in R will handle the model-building process as follows:
+```{r, cache=TRUE}
+modRF<-train(classe~.,data=training,method='rf',verbose=FALSE,trControl=fitparams)
+modRF$finalModel
+```
+
+## Results  
+
+We can see from the model summary above that our model fit does quite well at predicting the data it was trained on...of course, the real test will be to use this model on new data and see how accurate it is. We will now use the model to predict on the remaining 30% of the training set that we set aside for testing earlier.
+```{r}
+predictRF<-predict(modRF,testing)
+confusionMatrix(predictRF,testing$classe)
+```
+We see that on 'new' data, we were able to achieve an accuracy of 99.5%, or an out-of-sample error rate of 0.5%. That should be more than adequate to predict the 20 cases given as the quiz for this project. We'll quickly generate predictions for those cases:
+```{r}
+quizpredict<-predict(modRF,finalquiz)
+quizpredict
+```
+Plugging these predictions directly into the quiz on Coursera, we are able to correctly classify all 20 test cases. 
+
+## References
